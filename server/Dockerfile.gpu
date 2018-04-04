@@ -1,0 +1,85 @@
+FROM nvidia/cuda:9.0-cudnn7-devel-ubuntu16.04
+
+ENV TF_CUDA_VERSION=9.0 \
+    TF_CUDNN_VERSION=7 \
+    TF_SERVING_VERSION=1.5.0 \
+    BAZEL_VERSION=0.8.0
+
+RUN apt-get update && apt-get install -y \
+        build-essential \
+    	curl \
+	    git \
+	    libfreetype6-dev \
+	    libpng12-dev \
+	    libzmq3-dev \
+	    mlocate \
+	    pkg-config \
+	    python-dev \
+	    python-numpy \
+	    python-pip \
+	    software-properties-common \
+	    swig \
+	    zip \
+	    zlib1g-dev \
+	    libcurl3-dev \
+	    openjdk-8-jdk\
+	    openjdk-8-jre-headless \
+	    && \
+        apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
+
+# Set up  pip requirements
+RUN pip install mock grpcio awscli
+
+# Set up Bazel
+ENV BAZELRC /root/.bazelrc
+
+WORKDIR /
+RUN mkdir /bazel && \
+    cd /bazel && \
+    curl -fSsL -O https://github.com/bazelbuild/bazel/releases/download/$BAZEL_VERSION/bazel-$BAZEL_VERSION-installer-linux-x86_64.sh && \
+    curl -fSsL -o /bazel/LICENSE.txt https://raw.githubusercontent.com/bazelbuild/bazel/master/LICENSE && \
+    chmod +x bazel-*.sh && \
+    ./bazel-$BAZEL_VERSION-installer-linux-x86_64.sh && \
+    cd / && \
+    rm -f /bazel/bazel-$BAZEL_VERSION-installer-linux-x86_64.sh
+
+# Build TF Serving
+# K80: 	  3.7 (AWS P2)
+# M60:	  5.2 (AWS G3)
+# 1080TI: 6.1 (Personal)
+# V100:	  7.0 (AWS P3)
+ENV TF_NEED_CUDA=1 \
+    TF_CUDA_COMPUTE_CAPABILITIES="3.0,3.5,3.7,5.2,6.0,6.1,7.0" \
+    C_OPT_FLAGS="--copt=-msse4.1 --copt=-msse4.2 --copt=-mavx --copt=-mavx2 --copt=-mfma --copt=-O3" \
+    CUDA_TOOLKIT_PATH=/usr/local/cuda \
+    CUDNN_INSTALL_PATH=/usr/lib/x86_64-linux-gnu
+
+WORKDIR /
+RUN git clone https://github.com/tensorflow/serving && \
+    cd serving && \
+    git checkout tags/$TF_SERVING_VERSION && \
+    git submodule update --init -- tensorflow
+
+WORKDIR /serving
+RUN bazel build -c opt $C_OPT_FLAGS --config=cuda --crosstool_top=@local_config_cuda//crosstool:toolchain tensorflow_serving/model_servers:tensorflow_model_server
+RUN cp bazel-bin/tensorflow_serving/model_servers/tensorflow_model_server /usr/local/bin/
+RUN rm -r /serving
+
+ARG AWS_ACCESS_KEY_ID
+ARG AWS_SECRET_ACCESS_KEY
+ARG S3_MODEL_URL
+
+ARG SERVING_PORT
+ENV SERVING_PORT 8500
+
+ARG MODEL_NAME
+ENV MODEL_NAME test
+
+ENV MODEL_PATH=/root/models
+
+WORKDIR /
+RUN aws s3 sync $S3_MODEL_URL $MODEL_PATH/$MODEL_NAME
+
+EXPOSE $SERVING_PORT
+CMD tensorflow_model_server --port=$SERVING_PORT --model_name=$MODEL_NAME --model_base_path=$MODEL_PATH/$MODEL_NAME --enable_batching=true

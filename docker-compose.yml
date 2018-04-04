@@ -1,0 +1,16 @@
+version: '2'
+
+services:
+
+  server:
+    build:
+      context: server
+      dockerfile: Dockerfile.gpu
+      args:
+        - MODEL_NAME=test
+        - SERVING_PORT=8500
+        - AWS_ACCESS_KEY_ID
+        - AWS_SECRET_ACCESS_KEY
+        - S3_MODEL_URL
+    ports:
+      - "8500:8500"
